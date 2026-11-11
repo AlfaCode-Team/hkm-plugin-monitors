@@ -1,0 +1,68 @@
+{
+    "name": "monitors",
+    "version": "0.1.0",
+    "kernel": "^1.20.0",
+    "solves": "monitor.alerting",
+    "type": "module",
+
+    "requires": ["usage.metering", "webhook.delivery", "mail.delivery"],
+
+    "exposes": [
+        "Plugins\\Monitors\\API\\Contracts\\MonitorContract"
+    ],
+
+    "routes": [],
+    "emits": ["monitor.alert.fired", "monitor.alert.resolved"],
+    "listens": [],
+    "files": [],
+
+    "lang": { "path": "resources/lang", "namespace": "monitors", "global": false },
+
+    "jobs": [
+        { "name": "monitors.evaluate", "handler": "Plugins\\Monitors\\Application\\Jobs\\EvaluateMonitorsJob", "queue": "monitors", "retry": { "max": 1 }, "timeout": 120 }
+    ],
+
+    "commands": [
+        "Plugins\\Monitors\\Infrastructure\\Cli\\MonitorsEvaluateCommand",
+        "Plugins\\Monitors\\Infrastructure\\Cli\\MonitorsStatusCommand",
+        "Plugins\\Monitors\\Infrastructure\\Cli\\MonitorsAddCommand",
+        "Plugins\\Monitors\\Infrastructure\\Cli\\MonitorsPruneCommand"
+    ],
+
+    "schedule": [
+        {
+            "name": "monitors.evaluate",
+            "at": "*/5 * * * *",
+            "job": "monitors.evaluate",
+            "queue": "monitors",
+            "withoutOverlapping": true,
+            "expiresAfter": 240
+        },
+        {
+            "name": "monitors.prune",
+            "at": "41 3 * * *",
+            "command": "monitors:prune --quiet-when-idle",
+            "withoutOverlapping": true,
+            "expiresAfter": 1800
+        }
+    ],
+
+    "documentation": "Rules over usage metrics (counter sum over a window, gauge latest, counter growth) that fire and resolve with hysteresis — a resolve threshold separate from the fire threshold, and N consecutive evaluations each way — and notify by mail, webhook and console. Evaluated every five minutes by a queued job. Only state changes are notified; each is recorded in one transaction with the state that caused it and sent afterwards, per channel, with retries.",
+
+    "//withoutOverlapping-is-mandatory": "An evaluation that outlives its slot would otherwise be queued a second time and both runs would raise the same alert. The schedule entry declares withoutOverlapping, and ScheduleDeclarationTest compiles THIS file with the kernel's own compiler and runs the kernel's own Scheduler to prove the second dispatch is refused. expiresAfter is 240, not 300: for a queued job the lock is NOT released when the job finishes, it simply expires, so it has to be shorter than the five-minute interval or the next tick is skipped too. Two further guards exist (a CachePort lock inside evaluate(), and an optimistic version on every rule's state row) because the scheduler lock is advisory and a cache can be down.",
+
+    "//the-webhook-channel-is-an-event": "webhook.delivery has no send method. It subscribes to the EventBus and delivers events to endpoints that registered a pattern, so this plugin dispatches monitor.alert.fired and monitor.alert.resolved. Register a webhook endpoint for monitor.alert.* to receive them; with none registered the channel succeeds and nothing leaves the building. EventBus::dispatch() returns listener failures instead of throwing, and the notifier turns a non-empty result into a failed channel so the alert is retried.",
+
+    "//no-data-is-not-recovery": "A metric that stops reporting (a stopped queue worker, a gauge never set) leaves a rule's state exactly where it was. It is neither a breach nor a recovery: treating silence as OK would turn a dead pipeline into a resolved alert.",
+
+    "//cli-queues-it": "monitors:evaluate queues the same job the schedule does, rather than evaluating in the CLI process, because metrics are only readable through the Usage contract inside a worker's or request's container.",
+
+    "config": [
+        { "key": "MONITORS_QUEUE", "type": "string", "required": false, "default": "monitors" },
+        { "key": "MONITORS_MAX_ATTEMPTS", "type": "int", "required": false, "default": 5 },
+        { "key": "MONITORS_CLAIM_TIMEOUT", "type": "int", "required": false, "default": 300 },
+        { "key": "MONITORS_RETAIN_DAYS", "type": "int", "required": false, "default": 90 },
+        { "key": "MONITORS_LOCK_SECONDS", "type": "int", "required": false, "default": 240 },
+        { "key": "MONITORS_BATCH", "type": "int", "required": false, "default": 50 }
+    ]
+}
